@@ -15,7 +15,7 @@ from ..utils import (
 
 
 class RoosterTeethIE(InfoExtractor):
-    _VALID_URL = r'https?://(?:.+?\.)?roosterteeth\.com/(?:episode|watch)/(?P<id>[^/?#&]+)'
+    _VALID_URL = r'https?://(?:.+?\.)?roosterteeth\.com/(?P<type>episode|watch|series)/(?P<id>[^/?#&]+)(?:\?(?:season=(?P<season>\d+))?)?'
     _NETRC_MACHINE = 'roosterteeth'
     _TESTS = [{
         'url': 'http://roosterteeth.com/episode/million-dollars-but-season-2-million-dollars-but-the-game-announcement',
@@ -50,7 +50,8 @@ class RoosterTeethIE(InfoExtractor):
         'url': 'https://roosterteeth.com/watch/million-dollars-but-season-2-million-dollars-but-the-game-announcement',
         'only_matching': True,
     }]
-    _EPISODE_BASE_URL = 'https://svod-be.roosterteeth.com/api/v1/episodes/'
+    _API_BASE_URL = 'https://svod-be.roosterteeth.com'
+    _EPISODE_BASE_URL = _API_BASE_URL + '/api/v1/episodes/'
 
     def _login(self):
         username, password = self._get_login_info()
@@ -82,27 +83,25 @@ class RoosterTeethIE(InfoExtractor):
         self._login()
 
     def _real_extract(self, url):
-        display_id = self._match_id(url)
-        api_episode_url = self._EPISODE_BASE_URL + display_id
-
-        try:
-            m3u8_url = self._download_json(
-                api_episode_url + '/videos', display_id,
-                'Downloading video JSON metadata')['data'][0]['attributes']['url']
-        except ExtractorError as e:
-            if isinstance(e.cause, compat_HTTPError) and e.cause.code == 403:
-                if self._parse_json(e.cause.read().decode(), display_id).get('access') is False:
-                    self.raise_login_required(
-                        '%s is only available for FIRST members' % display_id)
-            raise
-
-        formats = self._extract_m3u8_formats(
-            m3u8_url, display_id, 'mp4', 'm3u8_native', m3u8_id='hls')
-        self._sort_formats(formats)
-
-        episode = self._download_json(
-            api_episode_url, display_id,
-            'Downloading episode JSON metadata')['data'][0]
+        from pprint import pprint
+        match = self._VALID_URL_RE.match(url).groupdict()
+        if match['type'] == 'series':
+            show_name = match['id']
+            season_id = None if match['season'] is None else int(match['season'])
+            episodes = []
+            
+            for season in self._download_json(self._API_BASE_URL + '/api/v1/shows/%s/seasons?order=asc' % (show_name), None, 'Downloading seasons JSON metadata')['data']:
+                if season_id is None or season['attributes']['number'] == season_id:
+                    for episode in self._download_json(self._API_BASE_URL + season['links']['episodes'], None, 'Downloading season %s episode list' % (season['id']))['data']:
+                        episodes.append(self._get_episode_info(episode, episode['attributes']['slug']))
+            return self.playlist_result(episodes)
+        else:        
+            episode = self._download_json(
+                self._EPISODE_BASE_URL + match['id'], display_id,
+                'Downloading episode JSON metadata')['data'][0]
+            return self._get_episode_meta(episode, episode['attributes']['slug'])
+        
+    def _get_episode_info(self, episode, display_id):
         attributes = episode['attributes']
         title = attributes.get('title') or attributes['display_title']
         video_id = compat_str(episode['id'])
@@ -118,6 +117,21 @@ class RoosterTeethIE(InfoExtractor):
                             'id': k,
                             'url': img_url,
                         })
+
+        try:
+            m3u8_url = self._download_json(
+                self._API_BASE_URL + episode['links']['videos'], display_id,
+                'Downloading video JSON metadata')['data'][0]['attributes']['url']
+        except ExtractorError as e:
+            if isinstance(e.cause, compat_HTTPError) and e.cause.code == 403:
+                if self._parse_json(e.cause.read().decode(), display_id).get('access') is False:
+                    self.raise_login_required(
+                        '%s is only available for FIRST members' % display_id)
+            raise
+
+        formats = self._extract_m3u8_formats(
+            m3u8_url, display_id, 'mp4', 'm3u8_native', m3u8_id='hls')
+        self._sort_formats(formats)
 
         return {
             'id': video_id,
